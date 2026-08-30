@@ -197,6 +197,21 @@ func (c *Client) Login(email, password string) (LoginResponse, error) {
 	return out, err
 }
 
+// exchangeRequest is the body posted to the CLI code-exchange endpoint.
+type exchangeRequest struct {
+	Code string `json:"code"`
+}
+
+// ExchangeCliCode swaps a single-use browser-login code (delivered to the CLI's
+// loopback server after the customer approves in the browser) for a session token.
+// It does not require an existing token.
+func (c *Client) ExchangeCliCode(code string) (LoginResponse, error) {
+	var out LoginResponse
+	err := c.do(context.Background(), http.MethodPost, "/api/v1/auth/cli/exchange",
+		exchangeRequest{Code: code}, &out)
+	return out, err
+}
+
 // Me returns the currently signed-in account.
 func (c *Client) Me() (Me, error) {
 	var out Me

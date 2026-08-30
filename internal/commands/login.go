@@ -6,11 +6,17 @@ package commands
 
 import (
 	"bufio"
+	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"errors"
 	"fmt"
+	"net"
+	"net/http"
+	"net/url"
 	"os"
-	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -18,68 +24,184 @@ import (
 )
 
 // loginEmailFlag and loginPasswordFlag back the --email and --password flags,
-// which let scripts and CI sign in without an interactive prompt.
+// which let scripts and CI sign in without an interactive prompt. loginNoBrowser
+// keeps the browser flow but prints the URL instead of opening it automatically.
 var (
 	loginEmailFlag    string
 	loginPasswordFlag string
+	loginNoBrowser    bool
 )
 
 // loginCmd signs the user in and stores the returned session token.
 var loginCmd = &cobra.Command{
 	Use:   "login",
 	Short: "Sign in to Ruust",
-	Long: "Sign in to Ruust with your email and password. The returned session\n" +
-		"token is saved to your config so the other commands can use it.\n\n" +
-		"Pass --email and --password to sign in without a prompt, handy for CI.",
+	Long: "Sign in to Ruust. By default this opens your browser: you sign in on the\n" +
+		"website and approve this computer, so no password is ever typed into the\n" +
+		"terminal. The returned session token is saved to your config.\n\n" +
+		"Pass --email and --password to sign in without a browser, handy for CI.\n" +
+		"Pass --no-browser to print the sign-in link instead of opening it.",
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		email := strings.TrimSpace(loginEmailFlag)
-		password := loginPasswordFlag
+		// A supplied --password means the non-interactive path (CI and scripts). The
+		// default is the browser flow, so a password never travels through the terminal.
+		if loginPasswordFlag != "" {
+			return passwordLogin()
+		}
+		return browserLogin(loginNoBrowser)
+	},
+}
 
-		// Prompt for anything the flags did not supply.
-		if email == "" {
-			e, err := promptLine("Email: ")
-			if err != nil {
-				return err
-			}
-			email = strings.TrimSpace(e)
-		}
-		if email == "" {
-			return errors.New("an email is required to sign in")
-		}
+// passwordLogin signs in with an email and password (from flags, or prompted). It
+// is the non-interactive path for CI and scripts; the default is the browser flow.
+func passwordLogin() error {
+	email := strings.TrimSpace(loginEmailFlag)
+	password := loginPasswordFlag
 
-		if password == "" {
-			p, err := promptPassword("Password: ")
-			if err != nil {
-				return err
-			}
-			password = p
-		}
-		if password == "" {
-			return errors.New("a password is required to sign in")
-		}
-
-		resp, err := Client().Login(email, password)
+	if email == "" {
+		e, err := promptLine("Email: ")
 		if err != nil {
 			return err
 		}
+		email = strings.TrimSpace(e)
+	}
+	if email == "" {
+		return errors.New("an email is required to sign in")
+	}
+	if password == "" {
+		return errors.New("a password is required to sign in")
+	}
 
-		// Persist the token and the email the server confirmed. Fall back to the
-		// email we sent if the server did not echo one back.
-		c := Config()
-		c.Token = resp.Token
-		if resp.Email != "" {
-			c.Email = resp.Email
-		} else {
-			c.Email = email
-		}
-		if err := c.Save(); err != nil {
-			return fmt.Errorf("saving config: %w", err)
-		}
+	resp, err := Client().Login(email, password)
+	if err != nil {
+		return err
+	}
+	confirmed := resp.Email
+	if confirmed == "" {
+		confirmed = email
+	}
+	return saveSession(resp.Token, confirmed)
+}
 
-		printLoginSuccess(c.Email)
-		return nil
-	},
+// browserLogin runs the loopback browser flow: it starts a local server on a
+// random loopback port, opens the browser to the authorise page (carrying that
+// port and a random state), waits for the control plane to redirect back with a
+// single-use code, exchanges the code for a session token, and saves it. No
+// password is entered in the terminal, and the token never travels through the URL.
+func browserLogin(noBrowser bool) error {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("starting the local sign-in server: %w", err)
+	}
+	defer func() { _ = ln.Close() }()
+	port := ln.Addr().(*net.TCPAddr).Port
+
+	state, err := randomState()
+	if err != nil {
+		return err
+	}
+
+	host := strings.TrimRight(Client().Host, "/")
+	authURL := fmt.Sprintf("%s/cli/auth?port=%d&state=%s", host, port, url.QueryEscape(state))
+
+	type result struct {
+		code string
+		err  error
+	}
+	ch := make(chan result, 1)
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		q := r.URL.Query()
+		// The state must match the one this process generated: it ties the callback
+		// to our own request and blocks a stray or forged callback.
+		if q.Get("state") != state {
+			writeResultPage(w, "Sign-in could not be verified",
+				"The sign-in did not match this session. Please run ruust login again.")
+			ch <- result{err: errors.New("the sign-in state did not match; please try again")}
+			return
+		}
+		if e := q.Get("error"); e != "" {
+			writeResultPage(w, "Sign-in cancelled", "You can close this tab and return to your terminal.")
+			ch <- result{err: errors.New("authorisation was declined in the browser")}
+			return
+		}
+		code := q.Get("code")
+		if code == "" {
+			writeResultPage(w, "Sign-in failed", "No code was returned. Please run ruust login again.")
+			ch <- result{err: errors.New("no authorisation code was returned")}
+			return
+		}
+		writeResultPage(w, "You are signed in", "You can close this tab and return to your terminal.")
+		ch <- result{code: code}
+	})
+
+	srv := &http.Server{Handler: mux}
+	go func() { _ = srv.Serve(ln) }()
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = srv.Shutdown(ctx)
+	}()
+
+	fmt.Fprintln(os.Stderr, ui.Subtle.Render("Opening your browser to sign in..."))
+	fmt.Fprintln(os.Stderr, ui.Key.Render(authURL))
+	if noBrowser {
+		fmt.Fprintln(os.Stderr, ui.Subtle.Render("Open the link above in your browser to continue."))
+	} else if err := openInBrowser(authURL); err != nil {
+		fmt.Fprintln(os.Stderr, ui.Subtle.Render("Could not open a browser automatically; open the link above."))
+	}
+
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			return res.err
+		}
+		resp, err := Client().ExchangeCliCode(res.code)
+		if err != nil {
+			return err
+		}
+		return saveSession(resp.Token, resp.Email)
+	case <-time.After(3 * time.Minute):
+		return errors.New("timed out waiting for the browser sign-in")
+	}
+}
+
+// randomState returns a high-entropy, URL-safe state string for the browser flow.
+func randomState() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generating a sign-in state: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(b), nil
+}
+
+// writeResultPage renders a small, self-contained page shown in the browser after
+// the loopback callback, telling the user to return to the terminal.
+func writeResultPage(w http.ResponseWriter, title, message string) {
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `<!doctype html><html lang="en-GB"><head><meta charset="utf-8">`+
+		`<meta name="viewport" content="width=device-width, initial-scale=1"><title>Ruust CLI</title>`+
+		`<style>body{margin:0;min-height:100vh;display:grid;place-items:center;`+
+		`background:#0a0812;color:#efeafc;font-family:system-ui,sans-serif}`+
+		`.card{max-width:26rem;padding:2rem;text-align:center}h1{font-size:1.3rem;margin:.4rem 0}`+
+		`p{color:#b7add6;line-height:1.6}</style></head>`+
+		`<body><div class="card"><div style="font-size:2rem">🥚</div><h1>%s</h1><p>%s</p></div></body></html>`,
+		title, message)
+}
+
+// saveSession persists the session token and email, then prints the welcome.
+func saveSession(token, email string) error {
+	c := Config()
+	c.Token = token
+	if email != "" {
+		c.Email = email
+	}
+	if err := c.Save(); err != nil {
+		return fmt.Errorf("saving config: %w", err)
+	}
+	printLoginSuccess(c.Email)
+	return nil
 }
 
 // promptLine writes a prompt to stderr and reads a single line from stdin. The
@@ -92,74 +214,6 @@ func promptLine(prompt string) (string, error) {
 		return "", fmt.Errorf("reading input: %w", err)
 	}
 	return strings.TrimRight(line, "\r\n"), nil
-}
-
-// promptPassword reads a password from stdin without echoing it to the terminal.
-//
-// It disables terminal echo with stty for the duration of the read, then
-// restores it, so the typed password never appears on screen. When stdin is not
-// a terminal (a pipe or here-doc, as in CI) it reads the line plainly, since
-// there is no echo to hide.
-func promptPassword(prompt string) (string, error) {
-	fmt.Fprint(os.Stderr, ui.Key.Render(prompt))
-
-	restore, hidden := hideInput()
-	if hidden {
-		defer restore()
-	}
-
-	reader := bufio.NewReader(os.Stdin)
-	line, err := reader.ReadString('\n')
-
-	// The suppressed newline the user pressed is not echoed, so add one so the
-	// next line of output starts cleanly.
-	if hidden {
-		fmt.Fprintln(os.Stderr)
-	}
-
-	if err != nil && line == "" {
-		return "", fmt.Errorf("reading password: %w", err)
-	}
-	return strings.TrimRight(line, "\r\n"), nil
-}
-
-// hideInput turns off terminal echo when stdin is an interactive terminal. It
-// returns a restore function and whether echo was actually disabled. When stdin
-// is not a terminal it is a no-op, so piped input still works.
-func hideInput() (restore func(), hidden bool) {
-	fi, err := os.Stdin.Stat()
-	if err != nil || (fi.Mode()&os.ModeCharDevice) == 0 {
-		return func() {}, false
-	}
-
-	saved, err := sttyState()
-	if err != nil {
-		return func() {}, false
-	}
-	if err := runStty("-echo"); err != nil {
-		return func() {}, false
-	}
-	return func() { _ = runStty(saved) }, true
-}
-
-// sttyState captures the current terminal settings so they can be restored after
-// echo is toggled off.
-func sttyState() (string, error) {
-	cmd := exec.Command("stty", "-g")
-	cmd.Stdin = os.Stdin
-	out, err := cmd.Output()
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(string(out)), nil
-}
-
-// runStty applies one or more stty arguments to the controlling terminal.
-func runStty(arg string) error {
-	cmd := exec.Command("stty", arg)
-	cmd.Stdin = os.Stdin
-	cmd.Stderr = os.Stderr
-	return cmd.Run()
 }
 
 // printLoginSuccess prints the ember logo and a warm welcome confirming who is
@@ -175,8 +229,10 @@ func printLoginSuccess(email string) {
 
 func init() {
 	loginCmd.Flags().StringVar(&loginEmailFlag, "email", "",
-		"Email to sign in with (prompts when omitted)")
+		"Email to sign in with, for the non-interactive (CI) path")
 	loginCmd.Flags().StringVar(&loginPasswordFlag, "password", "",
-		"Password to sign in with (prompts without echo when omitted)")
+		"Password for the non-interactive (CI) path; the default is a browser sign-in")
+	loginCmd.Flags().BoolVar(&loginNoBrowser, "no-browser", false,
+		"Print the sign-in link instead of opening a browser")
 	AddCommand(loginCmd)
 }
