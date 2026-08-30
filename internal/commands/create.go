@@ -28,8 +28,9 @@ var createCmd = &cobra.Command{
 	Aliases: []string{"deploy"},
 	Short:   "Hatch a new Egg from a git repo",
 	Long: "Create an Egg from a git repo and watch it go from incubating to hatched.\n" +
-		"Pricing is flat and per Egg with unmetered egress: nano £4, small £8,\n" +
-		"standard £16, large £30 per month.",
+		"Pricing is flat and per Egg with unmetered egress: nano £3, small £6,\n" +
+		"standard £12, large £24 per month. Custom sizes on the sliding scale are\n" +
+		"available in the dashboard.",
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if config.Token(cfg) == "" {
 			return errNotSignedIn
