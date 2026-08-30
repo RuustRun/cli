@@ -1,0 +1,69 @@
+# GoReleaser config for the ruust CLI. On a v* tag it cross-compiles macOS and
+# Linux binaries (amd64 + arm64), publishes a GitHub release with archives and
+# checksums, and updates the Homebrew formula in RuustRun/homebrew-tap, so the CLI
+# installs with:  brew install ruustrun/tap/ruust
+#
+# The Homebrew step only runs when a HOMEBREW_TAP_TOKEN is present (a PAT with write
+# access to the tap), so releases still publish binaries before that secret is set.
+# British English. No em dashes.
+version: 2
+
+project_name: ruust
+
+builds:
+  - id: ruust
+    main: .
+    binary: ruust
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+    ldflags:
+      - -s -w -X github.com/RuustRun/cli/internal/commands.Version={{ .Version }}
+
+archives:
+  - id: ruust
+    formats:
+      - tar.gz
+    name_template: "ruust_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+homebrew_casks:
+  - name: ruust
+    # Skip the tap update unless a token is configured, so a release never fails just
+    # because the secret has not been added yet.
+    skip_upload: '{{ if eq .Env.HOMEBREW_TAP_TOKEN "" }}true{{ else }}false{{ end }}'
+    repository:
+      owner: RuustRun
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    directory: Casks
+    homepage: "https://ruust.run"
+    description: "Command line for Ruust: deploy a git repo as an Egg with unmetered egress on a flat monthly price."
+    # Pin the download URL to the GitHub release assets, so it is correct regardless
+    # of how GoReleaser detects the SCM. The single binary in the archive is detected
+    # automatically.
+    url:
+      template: "https://github.com/RuustRun/cli/releases/download/{{ .Tag }}/{{ .ArtifactName }}"
+    # Clear the download quarantine so the unsigned binary runs without a Gatekeeper
+    # prompt on first use.
+    hooks:
+      post:
+        install: |
+          if system_command("/usr/bin/xattr", args: ["-h"]).exit_status == 0
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/ruust"]
+          end
+
+release:
+  github:
+    owner: RuustRun
+    name: cli

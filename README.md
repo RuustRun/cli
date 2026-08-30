@@ -8,14 +8,23 @@ Written in Go with [cobra](https://github.com/spf13/cobra) for commands and the
 [charm](https://github.com/charmbracelet) stack (bubbletea, lipgloss, bubbles) for the
 interactive dashboard. It talks to the same public `/api/v1` the rest of Ruust uses.
 
-## Install and build
+## Install
+
+Homebrew (macOS and Linux):
+
+```sh
+brew install ruustrun/tap/ruust
+```
+
+Or build from source:
 
 ```sh
 go build -o ruust .
 ```
 
-Move the `ruust` binary onto your `PATH`. Release binaries for macOS and Linux
-(amd64 and arm64) are published to GitHub Releases by the release workflow.
+Move the `ruust` binary onto your `PATH`. Each tagged release publishes macOS and
+Linux binaries (amd64 and arm64) to GitHub Releases and updates the Homebrew tap,
+via GoReleaser.
 
 ## Commands
 

@@ -4,3 +4,4 @@ ruust-darwin-*
 ruust-linux-*
 *.exe
 .DS_Store
+dist/
