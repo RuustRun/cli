@@ -30,7 +30,21 @@ var (
 	loginEmailFlag    string
 	loginPasswordFlag string
 	loginNoBrowser    bool
+	loginHostFlag     string
 )
+
+// normaliseHost trims a supplied control-plane URL and defaults the scheme to https,
+// so `--host ruust.run` and `--host https://ruust.run/` both work.
+func normaliseHost(h string) string {
+	h = strings.TrimSpace(h)
+	if h == "" {
+		return h
+	}
+	if !strings.HasPrefix(h, "http://") && !strings.HasPrefix(h, "https://") {
+		h = "https://" + h
+	}
+	return strings.TrimRight(h, "/")
+}
 
 // loginCmd signs the user in and stores the returned session token.
 var loginCmd = &cobra.Command{
@@ -40,9 +54,19 @@ var loginCmd = &cobra.Command{
 		"website and approve this computer, so no password is ever typed into the\n" +
 		"terminal. The returned session token is saved to your config.\n\n" +
 		"Pass --email and --password to sign in without a browser, handy for CI.\n" +
-		"Pass --no-browser to print the sign-in link instead of opening it.",
+		"Pass --no-browser to print the sign-in link instead of opening it.\n" +
+		"Pass --host to sign in to a specific control plane (default https://ruust.run);\n" +
+		"the host is saved, so it also re-points a CLI stuck on an old (for example\n" +
+		"localhost) host.",
 	SilenceUsage: true,
 	RunE: func(cmd *cobra.Command, args []string) error {
+		// --host switches which control plane to sign in to and PERSISTS it, so a
+		// stale stored host (for example a previous localhost dev login) cannot pin
+		// later commands to the wrong place. Applied before the client is built and
+		// saved with the session below.
+		if loginHostFlag != "" {
+			Config().Host = normaliseHost(loginHostFlag)
+		}
 		// A supplied --password means the non-interactive path (CI and scripts). The
 		// default is the browser flow, so a password never travels through the terminal.
 		if loginPasswordFlag != "" {
@@ -234,5 +258,7 @@ func init() {
 		"Password for the non-interactive (CI) path; the default is a browser sign-in")
 	loginCmd.Flags().BoolVar(&loginNoBrowser, "no-browser", false,
 		"Print the sign-in link instead of opening a browser")
+	loginCmd.Flags().StringVar(&loginHostFlag, "host", "",
+		"Control plane to sign in to (default https://ruust.run); saved for later commands")
 	AddCommand(loginCmd)
 }
