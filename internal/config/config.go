@@ -13,8 +13,11 @@ import (
 	"path/filepath"
 )
 
-// DefaultHost is the API host used when none is configured.
-const DefaultHost = "http://localhost:3939"
+// DefaultHost is the API host used when none is configured. It points at the hosted
+// control plane, so a freshly installed CLI talks to production out of the box. For
+// local development, override it with RUUST_HOST=http://localhost:3939 (or `ruust
+// login` against a local control plane, which stores the host in the config file).
+const DefaultHost = "https://ruust.run"
 
 // Config is the on-disk CLI configuration.
 type Config struct {
