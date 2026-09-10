@@ -21,16 +21,28 @@ import (
 // recent log lines to show.
 var logsLinesFlag int
 
+// logsBuildFlag and logsReleaseFlag switch from runtime logs to the latest deploy's
+// build output, or its release-command (e.g. migrations) output.
+var (
+	logsBuildFlag   bool
+	logsReleaseFlag bool
+)
+
 // logsCmd tails the logs for an Egg by name.
 var logsCmd = &cobra.Command{
 	Use:   "logs <name>",
 	Short: "Show the logs for an Egg",
-	Long: "logs resolves an Egg by name and prints its most recent log lines,\n" +
-		"timestamped and level-coloured like a terminal log tail.",
+	Long: "logs resolves an Egg by name and prints its most recent runtime log lines,\n" +
+		"timestamped and level-coloured like a terminal log tail.\n\n" +
+		"Use --build for the latest deploy's build output, or --release for its\n" +
+		"release-command output (e.g. database migrations run before the roll).",
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		if config.Token(cfg) == "" {
 			return fmt.Errorf("not signed in (run 'ruust login')")
+		}
+		if logsBuildFlag && logsReleaseFlag {
+			return fmt.Errorf("use only one of --build or --release")
 		}
 
 		name := strings.TrimSpace(args[0])
@@ -41,6 +53,19 @@ var logsCmd = &cobra.Command{
 			return err
 		}
 
+		if logsBuildFlag || logsReleaseFlag {
+			bl, err := client.BuildLog(egg.ID)
+			if err != nil {
+				return err
+			}
+			if logsReleaseFlag {
+				printReleaseLog(egg, bl)
+			} else {
+				printBuildLog(egg, bl)
+			}
+			return nil
+		}
+
 		res, err := client.Logs(egg.ID)
 		if err != nil {
 			return err
@@ -49,6 +74,77 @@ var logsCmd = &cobra.Command{
 		printLogs(egg, res.Lines, logsLinesFlag)
 		return nil
 	},
+}
+
+// deref returns the pointed-to string, or "" for nil.
+func deref(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}
+
+// printBuildLog renders the latest deploy's build output as a plain block.
+func printBuildLog(egg api.Egg, bl api.BuildLogResponse) {
+	head := ui.Title.Render("build") + " " + ui.Ember.Render(egg.Name)
+	if sha := deref(bl.GitSha); sha != "" {
+		head += " " + ui.Subtle.Render(shortSha(sha))
+	}
+	if st := deref(bl.Status); st != "" {
+		head += " " + ui.Subtle.Render("("+st+")")
+	}
+	fmt.Println(head)
+
+	if body := deref(bl.Log); body != "" {
+		fmt.Println(printableLog(body))
+		return
+	}
+	fmt.Println(ui.Subtle.Render("No build output (a database or demo Egg runs a prebuilt image)."))
+}
+
+// printReleaseLog renders the release-command outcome and captured output for the
+// latest deploy (e.g. the migrations run before the roll).
+func printReleaseLog(egg api.Egg, bl api.BuildLogResponse) {
+	head := ui.Title.Render("release") + " " + ui.Ember.Render(egg.Name)
+	if st := deref(bl.ReleaseStatus); st != "" {
+		head += " " + ui.Subtle.Render("· "+st)
+	}
+	if v := deref(bl.ReleaseAgentVersion); v != "" {
+		head += " " + ui.Subtle.Render("· agent "+v)
+	}
+	fmt.Println(head)
+
+	switch {
+	case deref(bl.ReleaseStatus) == "" && deref(bl.ReleaseLog) == "":
+		fmt.Println(ui.Subtle.Render("No release step for this deploy."))
+	case deref(bl.ReleaseLog) != "":
+		fmt.Println(printableLog(deref(bl.ReleaseLog)))
+	default:
+		fmt.Println(ui.Subtle.Render("Release " + deref(bl.ReleaseStatus) + " with no output."))
+	}
+}
+
+// printableLog trims trailing whitespace and renders a raw multi-line log body in
+// the mono log styling, dropping empty lines so the output reads cleanly.
+func printableLog(body string) string {
+	var b strings.Builder
+	for _, ln := range strings.Split(body, "\n") {
+		ln = strings.TrimRight(ln, "\r")
+		if ln == "" {
+			continue
+		}
+		b.WriteString(mono.Render(ln))
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
+// shortSha trims a git sha to its first seven characters for display.
+func shortSha(sha string) string {
+	if len(sha) > 7 {
+		return sha[:7]
+	}
+	return sha
 }
 
 // resolveEggByName finds the single Egg whose name matches, case-insensitively.
@@ -153,5 +249,9 @@ func renderLogLevel(level string) string {
 func init() {
 	logsCmd.Flags().IntVar(&logsLinesFlag, "lines", 0,
 		"limit output to the last N log lines (0 shows all returned)")
+	logsCmd.Flags().BoolVar(&logsBuildFlag, "build", false,
+		"show the latest deploy's build output instead of runtime logs")
+	logsCmd.Flags().BoolVar(&logsReleaseFlag, "release", false,
+		"show the latest deploy's release-command output (e.g. migrations)")
 	AddCommand(logsCmd)
 }

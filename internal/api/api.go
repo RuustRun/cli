@@ -91,6 +91,18 @@ type LogsResponse struct {
 	Lines []LogLine `json:"lines"`
 }
 
+// BuildLogResponse is a deploy's build output plus its release-command outcome and
+// output (e.g. migrations run before the roll). Fields are null when a deploy has no
+// build (a prebuilt image) or no release step.
+type BuildLogResponse struct {
+	Status              *string `json:"status"`
+	Log                 *string `json:"log"`
+	GitSha              *string `json:"gitSha"`
+	ReleaseStatus       *string `json:"releaseStatus"`
+	ReleaseLog          *string `json:"releaseLog"`
+	ReleaseAgentVersion *string `json:"releaseAgentVersion"`
+}
+
 // errorBody is the shape of a non-2xx response.
 type errorBody struct {
 	Error string `json:"error"`
@@ -255,6 +267,14 @@ func (c *Client) CreateEgg(repo, branch, region, tier string) (Egg, error) {
 func (c *Client) Logs(id string) (LogsResponse, error) {
 	var out LogsResponse
 	err := c.do(context.Background(), http.MethodGet, "/api/v1/eggs/"+id+"/logs", nil, &out)
+	return out, err
+}
+
+// BuildLog returns the latest deploy's build output and release-command outcome for
+// an Egg. The control plane returns the most recent deploy when no id is given.
+func (c *Client) BuildLog(id string) (BuildLogResponse, error) {
+	var out BuildLogResponse
+	err := c.do(context.Background(), http.MethodGet, "/api/v1/eggs/"+id+"/build-log", nil, &out)
 	return out, err
 }
 
