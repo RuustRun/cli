@@ -278,6 +278,22 @@ func (c *Client) BuildLog(id string) (BuildLogResponse, error) {
 	return out, err
 }
 
+// ShellSession is a freshly minted interactive-shell session: the relay WebSocket URL
+// (with a one-time token embedded) to connect to.
+type ShellSession struct {
+	SessionID string `json:"sessionId"`
+	Token     string `json:"token"`
+	WsURL     string `json:"wsUrl"`
+	ExpiresAt string `json:"expiresAt"`
+}
+
+// Shell mints an interactive-shell session for an Egg and returns the relay URL to open.
+func (c *Client) Shell(id string) (ShellSession, error) {
+	var out ShellSession
+	err := c.do(context.Background(), http.MethodPost, "/api/v1/eggs/"+id+"/shell", nil, &out)
+	return out, err
+}
+
 // Regions returns the deployment regions and their availability.
 func (c *Client) Regions() ([]Region, error) {
 	var out struct {
