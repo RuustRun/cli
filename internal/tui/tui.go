@@ -13,6 +13,8 @@
 package tui
 
 import (
+	"os"
+	"os/exec"
 	"strings"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -44,6 +46,7 @@ type keyMap struct {
 	Open    key.Binding
 	Back    key.Binding
 	Logs    key.Binding
+	Shell   key.Binding
 	Refresh key.Binding
 	Quit    key.Binding
 }
@@ -70,6 +73,10 @@ func defaultKeys() keyMap {
 		Logs: key.NewBinding(
 			key.WithKeys("g"),
 			key.WithHelp("g", "logs"),
+		),
+		Shell: key.NewBinding(
+			key.WithKeys("s"),
+			key.WithHelp("s", "shell"),
 		),
 		Refresh: key.NewBinding(
 			key.WithKeys("r"),
@@ -129,6 +136,12 @@ type detailLoadedMsg struct {
 type logsLoadedMsg struct {
 	lines []api.LogLine
 	err   error
+}
+
+// shellDoneMsg is sent when an interactive `ruust shell` subprocess (launched from the
+// detail pane) exits and the dashboard resumes.
+type shellDoneMsg struct {
+	err error
 }
 
 // Run launches the interactive dashboard against the given API client.
@@ -243,6 +256,14 @@ func (m model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.viewport.GotoBottom()
 		return m, nil
 
+	case shellDoneMsg:
+		// The shell subprocess has exited and bubbletea has restored the dashboard.
+		// A failure surfaces on the detail pane; the shell's own stderr showed the rest.
+		if msg.err != nil {
+			m.detailErr = "shell ended: " + msg.err.Error()
+		}
+		return m, nil
+
 	case tea.KeyMsg:
 		return m.handleKey(msg)
 	}
@@ -290,6 +311,12 @@ func (m model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.loadingID = m.detail.ID
 			m.screen = screenLoading
 			return m, tea.Batch(m.spinner.Tick, m.loadLogs(m.detail.ID))
+		}
+		if key.Matches(msg, m.keys.Shell) && m.detail != nil {
+			// Hand the terminal to `ruust shell <name>` (this same binary) so the shell
+			// runs interactively, then bubbletea restores the dashboard on exit.
+			c := exec.Command(os.Args[0], "shell", m.detail.Name)
+			return m, tea.ExecProcess(c, func(err error) tea.Msg { return shellDoneMsg{err: err} })
 		}
 		return m, nil
 
