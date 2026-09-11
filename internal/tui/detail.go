@@ -17,6 +17,7 @@ func (m model) detailView() string {
 	header := m.detailHeader()
 	footer := m.footer([]key.Binding{
 		m.keys.Logs,
+		m.keys.Shell,
 		m.keys.Back,
 		m.keys.Quit,
 	})
